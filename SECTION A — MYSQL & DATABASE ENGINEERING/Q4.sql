@@ -1,19 +1,24 @@
--- Index-Friendly Query Optimization
-
-CREATE TABLE Customers(Id INT PRIMARY KEY, Name VARCHAR(50), Country CHAR(2));
-CREATE TABLE Products(Id INT PRIMARY KEY, Name VARCHAR(50));
-CREATE TABLE Orders(Id INT PRIMARY KEY, CustomerId INT, ProductId INT, OrderDate DATETIME, Amount DECIMAL(10,2));
-
-SELECT o.Id, o.OrderDate, o.Amount, c.Name, p.Name AS Product   -- list only needed columns, not *
+-- MySQL 8.0+. A half-open date range keeps OrderDate searchable by an index.
+SELECT o.Id, o.OrderDate, o.Amount, c.Name, p.Name AS Product
 FROM Orders o
 JOIN Customers c ON c.Id = o.CustomerId
-JOIN Products  p ON p.Id = o.ProductId
+JOIN Products p ON p.Id = o.ProductId
 WHERE o.OrderDate >= '2026-06-01' AND o.OrderDate < '2026-07-01'
   AND c.Country = 'BD'
 ORDER BY o.OrderDate DESC;
 
-CREATE INDEX idx_cust_country   ON Customers(Country, Id);
-CREATE INDEX idx_ord_cust_date  ON Orders(CustomerId, OrderDate);   -- plan: customers first, then orders
-CREATE INDEX idx_ord_date_cust  ON Orders(OrderDate, CustomerId);   -- plan: date range first, also helps ORDER BY
--- Products.Id is already the primary key.
+-- Candidate indexes. Keep only the choices supported by the measured plan.
+CREATE INDEX idx_customers_country ON Customers(Country);
+CREATE INDEX idx_orders_date_customer ON Orders(OrderDate, CustomerId);
+-- Customers.Id and Products.Id already have primary-key indexes. If the
+-- optimizer starts with the filtered customers, test (CustomerId, OrderDate)
+-- as an alternative; do not add both order indexes without evidence.
 
+EXPLAIN ANALYZE
+SELECT o.Id, o.OrderDate, o.Amount, c.Name, p.Name AS Product
+FROM Orders o
+JOIN Customers c ON c.Id = o.CustomerId
+JOIN Products p ON p.Id = o.ProductId
+WHERE o.OrderDate >= '2026-06-01' AND o.OrderDate < '2026-07-01'
+  AND c.Country = 'BD'
+ORDER BY o.OrderDate DESC;

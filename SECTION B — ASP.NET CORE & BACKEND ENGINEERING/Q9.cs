@@ -1,19 +1,24 @@
-// Dynamic LINQ Sorting
+using System.Linq.Expressions;
+using System.Reflection;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
-// Setup
-
-CREATE TABLE Employees(Id INT PRIMARY KEY AUTO_INCREMENT, Name VARCHAR(50), Salary DECIMAL(10,2), JoiningDate DATE);
-INSERT INTO Employees(Name,Salary,JoiningDate) VALUES ('Rahim',500,'2020-01-10'),('Karim',700,'2019-05-01');
+// Dynamic LINQ sorting
+/*
+MySQL setup:
+CREATE TABLE Employees(
+    Id INT PRIMARY KEY AUTO_INCREMENT,
+    Name VARCHAR(50),
+    Salary DECIMAL(10,2),
+    JoiningDate DATE
+);
+*/
 
 public class Employee { public int Id {get;set;} public string Name {get;set;} = "";
                         public decimal Salary {get;set;} public DateTime JoiningDate {get;set;} }
 
 
-// Extension
-using System.Linq.Expressions;
-using System.Reflection;
-
-public class InvalidSortException(string msg) : ArgumentException(msg);
+public class InvalidSortException(string msg) : ArgumentException(msg) { }
 
 public static class SortExtensions
 {
@@ -24,10 +29,10 @@ public static class SortExtensions
         var parts = sort.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length > 2) throw new InvalidSortException("Invalid sort.");
 
-        // validate: must be a real public property, scalar only (no navigation properties)
+        // Accept public scalar properties, not navigation properties or indexers.
         var prop = typeof(T).GetProperty(parts[0],
             BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
-        if (prop == null || !(prop.PropertyType.IsValueType || prop.PropertyType == typeof(string)))
+        if (prop == null || prop.GetIndexParameters().Length != 0 || !IsSortable(prop.PropertyType))
             throw new InvalidSortException($"Cannot sort by '{parts[0]}'.");
 
         var desc = false;
@@ -45,6 +50,15 @@ public static class SortExtensions
             new[] { typeof(T), prop.PropertyType }, source.Expression, Expression.Quote(lambda));
 
         return source.Provider.CreateQuery<T>(call);
+    }
+
+    static bool IsSortable(Type type)
+    {
+        var scalar = Nullable.GetUnderlyingType(type) ?? type;
+        return scalar.IsPrimitive || scalar.IsEnum || scalar == typeof(string)
+            || scalar == typeof(decimal) || scalar == typeof(DateTime)
+            || scalar == typeof(DateTimeOffset) || scalar == typeof(Guid)
+            || scalar == typeof(TimeSpan);
     }
 }
 
@@ -66,12 +80,12 @@ public async Task<IActionResult> List(string? sort, CancellationToken ct)
 // Why it is safe
 
 
-The input is never put into SQL. The name is only used to look up a real property, and EF parameterizes the resulting expression tree.
-Unknown properties and navigation properties are rejected, so a path like Customer.Password can’t be sorted on.
-Only asc and desc are accepted, and the default is ascending.
+The input is never copied into SQL. The property name must match a public scalar
+property, and EF translates the expression into a safe query.
+Unknown properties, navigation paths, indexers, and invalid directions are rejected.
 
 
 // Invalid input
-Null or empty: return the query unchanged.
+Null or empty: return the query unchanged because no sort was requested.
 Unknown property, bad direction or extra tokens: throw InvalidSortException, returned as 400 Bad Request.
 Don’t silently ignore bad input. It hides client bugs.
