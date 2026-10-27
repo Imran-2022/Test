@@ -1,5 +1,5 @@
--- MySQL 8.0+. Optional values are bound parameters. Only allowlisted sort
--- expressions are added to the SQL text.
+-- MySQL 8.0+. Optional filters use procedure parameters, so values are never
+-- concatenated into SQL. Sort columns and direction are validated below.
 
 CREATE TABLE Customers (
     Id INT PRIMARY KEY,
@@ -36,31 +36,23 @@ CREATE PROCEDURE SearchOrders(
     IN p_size INT
 )
 BEGIN
-    DECLARE v_sort VARCHAR(30);
-    DECLARE v_dir VARCHAR(4);
-    DECLARE v_where TEXT;
+    DECLARE v_sortby VARCHAR(20) DEFAULT 'OrderDate';
+    DECLARE v_dir VARCHAR(4) DEFAULT 'DESC';
     DECLARE v_page INT DEFAULT 1;
     DECLARE v_size INT DEFAULT 20;
     DECLARE v_offset BIGINT UNSIGNED;
 
-    SET v_sort = CASE COALESCE(p_sortby, 'OrderDate')
-        WHEN 'CustomerName' THEN 'c.Name'
-        WHEN 'Amount' THEN 'o.Amount'
-        WHEN 'Status' THEN 'o.Status'
-        WHEN 'OrderDate' THEN 'o.OrderDate'
-        ELSE NULL
-    END;
-    IF v_sort IS NULL THEN
+    SET v_sortby = COALESCE(p_sortby, v_sortby);
+    SET v_dir = UPPER(COALESCE(p_dir, v_dir));
+    SET v_page = COALESCE(p_page, v_page);
+    SET v_size = COALESCE(p_size, v_size);
+
+    IF v_sortby NOT IN ('CustomerName', 'Amount', 'Status', 'OrderDate') THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid SortBy value';
     END IF;
-
-    SET v_dir = UPPER(COALESCE(p_dir, 'DESC'));
     IF v_dir NOT IN ('ASC', 'DESC') THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Sort direction must be ASC or DESC';
     END IF;
-
-    SET v_page = COALESCE(p_page, 1);
-    SET v_size = COALESCE(p_size, 20);
     IF v_page < 1 OR v_size < 1 OR v_size > 100 THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Page must be positive and PageSize must be 1 to 100';
     END IF;
@@ -73,62 +65,42 @@ BEGIN
 
     SET v_offset = (CAST(v_page AS UNSIGNED) - 1) * CAST(v_size AS UNSIGNED);
 
-    -- NULL means the filter was not supplied. The end date is exclusive so
-    -- the whole DateTo calendar day is included without applying DATE() to a column.
-    SET @search_name = IF(p_name IS NULL, NULL, CONCAT(p_name, '%'));
-    SET @search_from = p_from;
-    SET @search_to_exclusive = DATE_ADD(p_to, INTERVAL 1 DAY);
-    SET @search_min = p_min;
-    SET @search_max = p_max;
-    SET @search_status = p_status;
-    SET @search_country = p_country;
-    SET @search_city = p_city;
-    SET @search_limit = v_size;
-    SET @search_offset = v_offset;
+    SELECT COUNT(*) AS Total
+    FROM Orders o
+    JOIN Customers c ON c.Id = o.CustomerId
+    WHERE (p_name IS NULL OR c.Name LIKE CONCAT(p_name, '%'))
+      AND (p_from IS NULL OR o.OrderDate >= p_from)
+      AND (p_to IS NULL OR o.OrderDate < DATE_ADD(p_to, INTERVAL 1 DAY))
+      AND (p_min IS NULL OR o.Amount >= p_min)
+      AND (p_max IS NULL OR o.Amount <= p_max)
+      AND (p_status IS NULL OR o.Status = p_status)
+      AND (p_country IS NULL OR c.Country = p_country)
+      AND (p_city IS NULL OR c.City = p_city);
 
-    -- Keep one placeholder per filter, even when that filter is absent. This
-    -- keeps the EXECUTE USING parameter list the same for every search.
-    SET v_where = CONCAT(
-        ' WHERE 1=1',
-        IF(@search_name IS NULL, ' AND ? IS NULL', ' AND c.Name LIKE ?'),
-        IF(@search_from IS NULL, ' AND ? IS NULL', ' AND o.OrderDate >= ?'),
-        IF(@search_to_exclusive IS NULL, ' AND ? IS NULL', ' AND o.OrderDate < ?'),
-        IF(@search_min IS NULL, ' AND ? IS NULL', ' AND o.Amount >= ?'),
-        IF(@search_max IS NULL, ' AND ? IS NULL', ' AND o.Amount <= ?'),
-        IF(@search_status IS NULL, ' AND ? IS NULL', ' AND o.Status = ?'),
-        IF(@search_country IS NULL, ' AND ? IS NULL', ' AND c.Country = ?'),
-        IF(@search_city IS NULL, ' AND ? IS NULL', ' AND c.City = ?')
-    );
-
-    -- The count and page use exactly the same filters.
-    SET @search_sql = CONCAT(
-        'SELECT COUNT(*) AS Total FROM Orders o ',
-        'JOIN Customers c ON c.Id = o.CustomerId',
-        v_where
-    );
-    PREPARE count_stmt FROM @search_sql;
-    EXECUTE count_stmt USING
-        @search_name, @search_from, @search_to_exclusive, @search_min,
-        @search_max, @search_status, @search_country, @search_city;
-    DEALLOCATE PREPARE count_stmt;
-
-    -- Id is a tie-breaker, so ordering and pages are stable.
-    SET @search_sql = CONCAT(
-        'SELECT o.Id, c.Name, c.Country, c.City, o.OrderDate, o.Amount, o.Status ',
-        'FROM Orders o JOIN Customers c ON c.Id = o.CustomerId',
-        v_where,
-        ' ORDER BY ', v_sort, ' ', v_dir, ', o.Id ', v_dir,
-        ' LIMIT ? OFFSET ?'
-    );
-    PREPARE page_stmt FROM @search_sql;
-    EXECUTE page_stmt USING
-        @search_name, @search_from, @search_to_exclusive, @search_min,
-        @search_max, @search_status, @search_country, @search_city,
-        @search_limit, @search_offset;
-    DEALLOCATE PREPARE page_stmt;
+    SELECT o.Id, c.Name, c.Country, c.City, o.OrderDate, o.Amount, o.Status
+    FROM Orders o
+    JOIN Customers c ON c.Id = o.CustomerId
+    WHERE (p_name IS NULL OR c.Name LIKE CONCAT(p_name, '%'))
+      AND (p_from IS NULL OR o.OrderDate >= p_from)
+      AND (p_to IS NULL OR o.OrderDate < DATE_ADD(p_to, INTERVAL 1 DAY))
+      AND (p_min IS NULL OR o.Amount >= p_min)
+      AND (p_max IS NULL OR o.Amount <= p_max)
+      AND (p_status IS NULL OR o.Status = p_status)
+      AND (p_country IS NULL OR c.Country = p_country)
+      AND (p_city IS NULL OR c.City = p_city)
+    ORDER BY
+        CASE WHEN v_sortby = 'CustomerName' AND v_dir = 'ASC' THEN c.Name END ASC,
+        CASE WHEN v_sortby = 'CustomerName' AND v_dir = 'DESC' THEN c.Name END DESC,
+        CASE WHEN v_sortby = 'Amount' AND v_dir = 'ASC' THEN o.Amount END ASC,
+        CASE WHEN v_sortby = 'Amount' AND v_dir = 'DESC' THEN o.Amount END DESC,
+        CASE WHEN v_sortby = 'Status' AND v_dir = 'ASC' THEN o.Status END ASC,
+        CASE WHEN v_sortby = 'Status' AND v_dir = 'DESC' THEN o.Status END DESC,
+        CASE WHEN v_sortby = 'OrderDate' AND v_dir = 'ASC' THEN o.OrderDate END ASC,
+        CASE WHEN v_sortby = 'OrderDate' AND v_dir = 'DESC' THEN o.OrderDate END DESC,
+        o.Id ASC
+    LIMIT v_size OFFSET v_offset;
 END$$
 DELIMITER ;
 
--- Check the actual plans for common searches with EXPLAIN ANALYZE. Indexes
--- should match real filters and sort orders; avoid adding one for every
--- possible optional-filter combination.
+-- Check actual plans for common searches with EXPLAIN ANALYZE. Optional-filter
+-- predicates can affect index use, so keep only indexes that help real queries.
