@@ -74,43 +74,49 @@ public sealed class QueryService(AppDbContext db) : IQueryService
 public record OrderSearch(string? Status, DateTime? From, DateTime? To, decimal? MinAmount,
                           string? SortBy, string? SortDir, int Page = 1, int PageSize = 20);
 
-static readonly Dictionary<string, Func<IQueryable<Order>, bool, IOrderedQueryable<Order>>> Sorts =
-    new(StringComparer.OrdinalIgnoreCase)
+[ApiController]
+public sealed class OrdersController : ControllerBase
 {
-    ["date"]   = (q, desc) => desc ? q.OrderByDescending(o => o.OrderDate).ThenByDescending(o => o.Id)
-                                   : q.OrderBy(o => o.OrderDate).ThenBy(o => o.Id),
-    ["amount"] = (q, desc) => desc ? q.OrderByDescending(o => o.Amount).ThenByDescending(o => o.Id)
-                                   : q.OrderBy(o => o.Amount).ThenBy(o => o.Id),
-    ["status"] = (q, desc) => desc ? q.OrderByDescending(o => o.Status).ThenByDescending(o => o.Id)
-                                   : q.OrderBy(o => o.Status).ThenBy(o => o.Id),
-};
-
-[HttpGet("api/orders")]
-public async Task<IActionResult> Search([FromQuery] OrderSearch s, IQueryService svc, CancellationToken ct)
-{
-    if (s.SortBy is not null && !Sorts.ContainsKey(s.SortBy)) return Problem("Invalid SortBy.", statusCode: 400);
-    if (s.SortDir is not null
-        && !s.SortDir.Equals("asc", StringComparison.OrdinalIgnoreCase)
-        && !s.SortDir.Equals("desc", StringComparison.OrdinalIgnoreCase))
-        return Problem("SortDir must be asc or desc.", statusCode: 400);
-    if (s.From is not null && s.To is not null && s.From > s.To)
-        return Problem("From must not be later than To.", statusCode: 400);
-    var sort = Sorts[s.SortBy ?? "date"];
-    var desc = !string.Equals(s.SortDir, "asc", StringComparison.OrdinalIgnoreCase);
-
-    var spec = new QuerySpec<Order, OrderDto>
+    static readonly Dictionary<string, Func<IQueryable<Order>, bool, IOrderedQueryable<Order>>> Sorts =
+        new(StringComparer.OrdinalIgnoreCase)
     {
-        Select = o => new OrderDto(o.Id, o.Customer.Name, o.OrderDate, o.Amount, o.Status),
-        Order  = q => sort(q, desc),
-        Page = s.Page, PageSize = s.PageSize
+        ["date"]   = (q, desc) => desc ? q.OrderByDescending(o => o.OrderDate).ThenByDescending(o => o.Id)
+                                       : q.OrderBy(o => o.OrderDate).ThenBy(o => o.Id),
+        ["amount"] = (q, desc) => desc ? q.OrderByDescending(o => o.Amount).ThenByDescending(o => o.Id)
+                                       : q.OrderBy(o => o.Amount).ThenBy(o => o.Id),
+        ["status"] = (q, desc) => desc ? q.OrderByDescending(o => o.Status).ThenByDescending(o => o.Id)
+                                       : q.OrderBy(o => o.Status).ThenBy(o => o.Id),
     };
-    if (s.Status is not null)    spec.Filters.Add(o => o.Status == s.Status);
-    if (s.From is not null)      spec.Filters.Add(o => o.OrderDate >= s.From);
-    if (s.To is not null)        spec.Filters.Add(o => o.OrderDate < s.To.Value.AddDays(1));
-    if (s.MinAmount is not null) spec.Filters.Add(o => o.Amount >= s.MinAmount);
-    if (s.Page < 1 || s.PageSize < 1 || s.PageSize > 100
-        || (long)(s.Page - 1) * s.PageSize > int.MaxValue)
-        return Problem("Page must be positive and PageSize must be between 1 and 100.", statusCode: 400);
 
-    return Ok(await svc.GetPageAsync(spec, ct));
+    [HttpGet("api/orders")]
+    public async Task<IActionResult> Search(
+        [FromQuery] OrderSearch s, [FromServices] IQueryService svc, CancellationToken ct)
+    {
+        if (s.Page < 1 || s.PageSize < 1 || s.PageSize > 100
+            || (long)(s.Page - 1) * s.PageSize > int.MaxValue)
+            return Problem("Page must be positive and PageSize must be between 1 and 100.", statusCode: 400);
+        if (s.SortBy is not null && !Sorts.ContainsKey(s.SortBy)) return Problem("Invalid SortBy.", statusCode: 400);
+        if (s.SortDir is not null
+            && !s.SortDir.Equals("asc", StringComparison.OrdinalIgnoreCase)
+            && !s.SortDir.Equals("desc", StringComparison.OrdinalIgnoreCase))
+            return Problem("SortDir must be asc or desc.", statusCode: 400);
+        if (s.From is not null && s.To is not null && s.From > s.To)
+            return Problem("From must not be later than To.", statusCode: 400);
+
+        var sort = Sorts[s.SortBy ?? "date"];
+        var desc = !string.Equals(s.SortDir, "asc", StringComparison.OrdinalIgnoreCase);
+
+        var spec = new QuerySpec<Order, OrderDto>
+        {
+            Select = o => new OrderDto(o.Id, o.Customer.Name, o.OrderDate, o.Amount, o.Status),
+            Order  = q => sort(q, desc),
+            Page = s.Page, PageSize = s.PageSize
+        };
+        if (s.Status is not null)    spec.Filters.Add(o => o.Status == s.Status);
+        if (s.From is not null)      spec.Filters.Add(o => o.OrderDate >= s.From);
+        if (s.To is not null)        spec.Filters.Add(o => o.OrderDate < s.To.Value.AddDays(1));
+        if (s.MinAmount is not null) spec.Filters.Add(o => o.Amount >= s.MinAmount);
+
+        return Ok(await svc.GetPageAsync(spec, ct));
+    }
 }

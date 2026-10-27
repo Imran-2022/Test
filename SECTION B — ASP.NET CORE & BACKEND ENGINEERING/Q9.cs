@@ -30,8 +30,11 @@ public static class SortExtensions
         if (parts.Length > 2) throw new InvalidSortException("Invalid sort.");
 
         // Accept public scalar properties, not navigation properties or indexers.
-        var prop = typeof(T).GetProperty(parts[0],
-            BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+        // Compare names ourselves: GetProperty(IgnoreCase) can throw
+        // AmbiguousMatchException when two properties differ only by case.
+        var prop = typeof(T)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .FirstOrDefault(p => p.Name.Equals(parts[0], StringComparison.OrdinalIgnoreCase));
         if (prop == null || prop.GetIndexParameters().Length != 0 || !IsSortable(prop.PropertyType))
             throw new InvalidSortException($"Cannot sort by '{parts[0]}'.");
 
@@ -63,29 +66,29 @@ public static class SortExtensions
 }
 
 // Usage
+//   db.Employees.OrderBy("Name");
+//   db.Employees.OrderBy("Salary desc");
+//   db.Employees.OrderBy("JoiningDate");
 
-db.Employees.OrderBy("Name");
-db.Employees.OrderBy("Salary desc");
-db.Employees.OrderBy("JoiningDate");
-
-[HttpGet("api/employees")]
-public async Task<IActionResult> List(string? sort, CancellationToken ct)
+[ApiController]
+public sealed class EmployeesController(AppDbContext db) : ControllerBase
 {
-    try { return Ok(await db.Employees.AsNoTracking().OrderBy(sort).ToListAsync(ct)); }
-    catch (InvalidSortException ex) { return Problem(ex.Message, statusCode: 400); }
+    [HttpGet("api/employees")]
+    public async Task<IActionResult> List(string? sort, CancellationToken ct)
+    {
+        try { return Ok(await db.Employees.AsNoTracking().OrderBy(sort).ToListAsync(ct)); }
+        catch (InvalidSortException ex) { return Problem(ex.Message, statusCode: 400); }
+    }
 }
 
 /*
-
-// Why it is safe
-
-
+Why it is safe
 The input is never copied into SQL. The property name must match a public scalar
 property, and EF translates the expression into a safe query.
 Unknown properties, navigation paths, indexers, and invalid directions are rejected.
 
-
-// Invalid input
+Invalid input
 Null or empty: return the query unchanged because no sort was requested.
-Unknown property, bad direction or extra tokens: throw InvalidSortException, returned as 400 Bad Request.
-Don’t silently ignore bad input. It hides client bugs.
+Unknown property, bad direction or extra tokens: throw InvalidSortException,
+returned as 400 Bad Request. Don't silently ignore bad input; it hides client bugs.
+*/
